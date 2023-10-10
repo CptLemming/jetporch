@@ -84,7 +84,7 @@ impl ConnectionFactory for SshFactory {
 
         // how we connect to a host depends on some settings of the play (ssh_port, ssh_user), the CLI (--user) and
         // possibly magic variables on the host.  The context contains all of this logic.
-        let (hostname2, user, port, key, passphrase) = ctx.get_ssh_connection_details(host);      
+        let (hostname2, user, port, key, passphrase, transfer_protocol) = ctx.get_ssh_connection_details(host);      
         if hostname2.eq("localhost") { 
             // jet_ssh_hostname was set to localhost, which doesn't make a lot of sense but could happen in testing
             // contrived playbooks when we don't want a lot of real remote hosts
@@ -93,7 +93,7 @@ impl ConnectionFactory for SshFactory {
         }
 
         // actually connect here
-        let mut conn = SshConnection::new(Arc::clone(&host), &user, port, hostname2, self.forward_agent, self.login_password.clone(), key, passphrase);
+        let mut conn = SshConnection::new(Arc::clone(&host), &user, port, hostname2, self.forward_agent, self.login_password.clone(), key, passphrase, transfer_protocol);
         return match conn.connect() {
             Ok(_)  => { 
                 let conn2 : Arc<Mutex<dyn Connection>> = Arc::new(Mutex::new(conn));
@@ -115,12 +115,102 @@ pub struct SshConnection {
     pub forward_agent: bool,
     pub login_password: Option<String>,
     pub key: Option<String>,
-    pub passphrase: Option<String>
+    pub passphrase: Option<String>,
+    pub transfer_protocol: Option<String>,
 }
 
 impl SshConnection {
-    pub fn new(host: Arc<RwLock<Host>>, username: &String, port: i64, hostname: String, forward_agent: bool, login_password: Option<String>, key: Option<String>, passphrase: Option<String>) -> Self {
-        Self { host: Arc::clone(&host), username: username.clone(), port, hostname, session: None, forward_agent, login_password, key, passphrase }
+    pub fn new(host: Arc<RwLock<Host>>, username: &String, port: i64, hostname: String, forward_agent: bool, login_password: Option<String>, key: Option<String>, passphrase: Option<String>, transfer_protocol: Option<String>) -> Self {
+        Self { host: Arc::clone(&host), username: username.clone(), port, hostname, session: None, forward_agent, login_password, key, passphrase, transfer_protocol: transfer_protocol }
+    }
+
+    fn copy_file_sftp(&self, response: &Arc<Response>, request: &Arc<TaskRequest>, src: &Path, remote_path: &String) -> Result<(), Arc<TaskResponse>> {
+        
+        // this is a streaming copy that should be fine with large files.
+
+        let src_open_result = File::open(src);
+        let mut src = match src_open_result {
+            Ok(x) => x,
+            Err(y) => { return Err(response.is_failed(request, &format!("failed to open source file: {y}"))); }
+        };
+
+        let session = self.session.as_ref().expect("session not established");
+        let sftp_result = session.sftp();
+        let sftp = match sftp_result {
+            Ok(x) => x,
+            Err(y) => { return Err(response.is_failed(request, &format!("sftp connection failed: {y}"))); }
+        };
+        let sftp_path = Path::new(&remote_path);
+        let fh_result = sftp.create(sftp_path);
+        let mut fh = match fh_result {
+            Ok(x) => x,
+            Err(y) => { return Err(response.is_failed(request, &format!("sftp write failed (1): {y}"))) }
+        };
+
+        let chunk_size = 64536;
+
+        loop {
+            let mut chunk = Vec::with_capacity(chunk_size);
+            let mut taken = std::io::Read::by_ref(&mut src).take(chunk_size as u64);
+            let take_result = taken.read_to_end(&mut chunk);
+            let n = match take_result {
+                Ok(x) => x,
+                Err(y) => { return Err(response.is_failed(request, &format!("failed during file transfer: {y}"))); }
+            };
+            if n == 0 { break; }
+            match fh.write(&chunk) {
+                Err(y) => { return Err(response.is_failed(request, &format!("sftp write failed: {y}"))); }
+                _ => {},
+
+            }
+        }
+        return Ok(());
+    }
+
+    fn copy_file_scp(&self, response: &Arc<Response>, request: &Arc<TaskRequest>, src: &Path, remote_path: &String) -> Result<(), Arc<TaskResponse>> {
+
+        // this is a streaming copy that should be fine with large files.
+
+        let src_open_result = File::open(src);
+        let mut src = match src_open_result {
+            Ok(x) => x,
+            Err(y) => { return Err(response.is_failed(request, &format!("failed to open source file: {y}"))); }
+        };
+
+        let session = self.session.as_ref().expect("session not established");
+        let src_len = match src.metadata() {
+            Ok(m) => m.len(),
+            Err(y) => { return Err(response.is_failed(request, &format!("scp failed to stat src: {y}"))); }
+        };
+        let sftp_path = Path::new(&remote_path);
+        let fh_result = session.scp_send(sftp_path, 0o644, src_len, None);
+        let mut fh = match fh_result {
+            Ok(x) => x,
+            Err(y) => { return Err(response.is_failed(request, &format!("scp connection failed: {y}"))); }
+        };
+
+        let chunk_size = 1024;
+
+        loop {
+            let mut chunk = Vec::with_capacity(chunk_size);
+            let mut taken = std::io::Read::by_ref(&mut src).take(chunk_size as u64);
+            let take_result = taken.read_to_end(&mut chunk);
+            let n = match take_result {
+                Ok(x) => x,
+                Err(y) => { return Err(response.is_failed(request, &format!("failed during file transfer: {y}"))); }
+            };
+            if n == 0 { break; }
+            match fh.write(&chunk) {
+                Err(y) => { return Err(response.is_failed(request, &format!("scp write failed: {y}"))); }
+                _ => {},
+
+            }
+        }
+
+        fh.send_eof().unwrap();
+        fh.wait_eof().unwrap();
+
+        return Ok(());
     }
 }
 
@@ -293,46 +383,14 @@ impl Connection for SshConnection {
     }
 
     fn copy_file(&self, response: &Arc<Response>, request: &Arc<TaskRequest>, src: &Path, remote_path: &String) -> Result<(), Arc<TaskResponse>> {
-
-        // this is a streaming copy that should be fine with large files.
-
-        let src_open_result = File::open(src);
-        let mut src = match src_open_result {
-            Ok(x) => x,
-            Err(y) => { return Err(response.is_failed(request, &format!("failed to open source file: {y}"))); }
-        };
-
-        let session = self.session.as_ref().expect("session not established");
-        let sftp_result = session.sftp();
-        let sftp = match sftp_result {
-            Ok(x) => x,
-            Err(y) => { return Err(response.is_failed(request, &format!("sftp connection failed: {y}"))); }
-        };
-        let sftp_path = Path::new(&remote_path);
-        let fh_result = sftp.create(sftp_path);
-        let mut fh = match fh_result {
-            Ok(x) => x,
-            Err(y) => { return Err(response.is_failed(request, &format!("sftp write failed (1): {y}"))) }
-        };
-
-        let chunk_size = 64536;
-
-        loop {
-            let mut chunk = Vec::with_capacity(chunk_size);
-            let mut taken = std::io::Read::by_ref(&mut src).take(chunk_size as u64);
-            let take_result = taken.read_to_end(&mut chunk);
-            let n = match take_result {
-                Ok(x) => x,
-                Err(y) => { return Err(response.is_failed(request, &format!("failed during file transfer: {y}"))); }
-            };
-            if n == 0 { break; }
-            match fh.write(&chunk) {
-                Err(y) => { return Err(response.is_failed(request, &format!("sftp write failed: {y}"))); }
-                _ => {},
-
+        if let Some(transfer_protocol) = self.transfer_protocol.as_ref() {
+            match transfer_protocol.as_str() {
+                "scp" => return self.copy_file_scp(response, request, src, remote_path),
+                _ => {}
             }
         }
-        return Ok(());
+
+        return self.copy_file_sftp(response, request, src, remote_path);
     }
 }
 

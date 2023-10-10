@@ -300,7 +300,7 @@ impl PlaybookContext {
 
     // FIXME: this should return a struct
 
-    pub fn get_ssh_connection_details(&self, host: &Arc<RwLock<Host>>) -> (String,String,i64,Option<String>,Option<String>) {
+    pub fn get_ssh_connection_details(&self, host: &Arc<RwLock<Host>>) -> (String,String,i64,Option<String>,Option<String>,Option<String>) {
 
         let vars = self.get_complete_blended_variables(host,BlendTarget::NotTemplateModule);
         let host2 = host.read().unwrap();
@@ -349,9 +349,18 @@ impl PlaybookContext {
                 Err(_) => None
             }
         };
+        let transfer_protocol: Option<String> = match vars.contains_key(&String::from("jet_ssh_transfer_protocol")) {
+            true => match vars.get(&String::from("jet_ssh_transfer_protocol")).unwrap().as_str() {
+                Some(x) => Some(String::from(x)),
+                None =>  None
+            },
+            false => match env::var("JET_SSH_TRANSFER_PROTOCOL") {
+                Ok(x) => Some(x),
+                Err(_) => None
+            }
+        };
 
-
-        return (remote_hostname, remote_user, remote_port, keyfile, passphrase)
+        return (remote_hostname, remote_user, remote_port, keyfile, passphrase, transfer_protocol)
     } 
 
     // loads environment variables into the context, adding an "ENV_foo" prefix
