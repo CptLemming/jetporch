@@ -94,7 +94,7 @@ impl Remote {
                 Some(HostOSType::MacOS) => format!("/Users/{}/.jet/tmp", who),
                 _ => format!("/home/{}/.jet/tmp", who),
             }
-            true => String::from("/root/.jet/tmp")
+            true => String::from("/tmp/.jet/tmp")
         };
         pb.push(tmpdir);
         let mut pb2 = pb.clone();
