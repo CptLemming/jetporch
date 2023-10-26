@@ -34,6 +34,8 @@ use std::path::Path;
 use std::time::Duration;
 use std::net::ToSocketAddrs;
 use std::fs::File;
+//use std::io;
+use std::io;
 
 // implementation for both Ssh Connections and the Ssh Connection factory
 
@@ -84,7 +86,7 @@ impl ConnectionFactory for SshFactory {
 
         // how we connect to a host depends on some settings of the play (ssh_port, ssh_user), the CLI (--user) and
         // possibly magic variables on the host.  The context contains all of this logic.
-        let (hostname2, user, port, key, passphrase, transfer_protocol) = ctx.get_ssh_connection_details(host);      
+        let (hostname2, user, port, key, passphrase, key_comment, transfer_protocol) = ctx.get_ssh_connection_details(host);
         if hostname2.eq("localhost") { 
             // jet_ssh_hostname was set to localhost, which doesn't make a lot of sense but could happen in testing
             // contrived playbooks when we don't want a lot of real remote hosts
@@ -93,7 +95,7 @@ impl ConnectionFactory for SshFactory {
         }
 
         // actually connect here
-        let mut conn = SshConnection::new(Arc::clone(&host), &user, port, hostname2, self.forward_agent, self.login_password.clone(), key, passphrase, transfer_protocol);
+        let mut conn = SshConnection::new(Arc::clone(&host), &user, port, hostname2, self.forward_agent, self.login_password.clone(), key, passphrase, key_comment, transfer_protocol);
         return match conn.connect() {
             Ok(_)  => { 
                 let conn2 : Arc<Mutex<dyn Connection>> = Arc::new(Mutex::new(conn));
@@ -116,12 +118,13 @@ pub struct SshConnection {
     pub login_password: Option<String>,
     pub key: Option<String>,
     pub passphrase: Option<String>,
+    pub key_comment: Option<String>,
     pub transfer_protocol: Option<String>,
 }
 
 impl SshConnection {
-    pub fn new(host: Arc<RwLock<Host>>, username: &String, port: i64, hostname: String, forward_agent: bool, login_password: Option<String>, key: Option<String>, passphrase: Option<String>, transfer_protocol: Option<String>) -> Self {
-        Self { host: Arc::clone(&host), username: username.clone(), port, hostname, session: None, forward_agent, login_password, key, passphrase, transfer_protocol: transfer_protocol }
+    pub fn new(host: Arc<RwLock<Host>>, username: &String, port: i64, hostname: String, forward_agent: bool, login_password: Option<String>, key: Option<String>, passphrase: Option<String>, key_comment: Option<String>, transfer_protocol: Option<String>) -> Self {
+        Self { host: Arc::clone(&host), username: username.clone(), port, hostname, session: None, forward_agent, login_password, key, passphrase, key_comment, transfer_protocol }
     }
 
     fn copy_file_sftp(&self, response: &Arc<Response>, request: &Arc<TaskRequest>, src: &Path, remote_path: &String) -> Result<(), Arc<TaskResponse>> {
@@ -129,7 +132,7 @@ impl SshConnection {
         // this is a streaming copy that should be fine with large files.
 
         let src_open_result = File::open(src);
-        let mut src = match src_open_result {
+        let src = match src_open_result {
             Ok(x) => x,
             Err(y) => { return Err(response.is_failed(request, &format!("failed to open source file: {y}"))); }
         };
@@ -142,28 +145,19 @@ impl SshConnection {
         };
         let sftp_path = Path::new(&remote_path);
         let fh_result = sftp.create(sftp_path);
-        let mut fh = match fh_result {
+        let fh = match fh_result {
             Ok(x) => x,
             Err(y) => { return Err(response.is_failed(request, &format!("sftp write failed (1): {y}"))) }
         };
 
-        let chunk_size = 64536;
+        let mut src2 = std::io::BufReader::with_capacity(1000000, src);
+        let mut fh2 = std::io::BufWriter::with_capacity(1000000, fh);
 
-        loop {
-            let mut chunk = Vec::with_capacity(chunk_size);
-            let mut taken = std::io::Read::by_ref(&mut src).take(chunk_size as u64);
-            let take_result = taken.read_to_end(&mut chunk);
-            let n = match take_result {
-                Ok(x) => x,
-                Err(y) => { return Err(response.is_failed(request, &format!("failed during file transfer: {y}"))); }
-            };
-            if n == 0 { break; }
-            match fh.write(&chunk) {
-                Err(y) => { return Err(response.is_failed(request, &format!("sftp write failed: {y}"))); }
-                _ => {},
+        match io::copy(&mut src2, &mut fh2) {
+            Ok(_) => {},
+            Err(y) => { return Err(response.is_failed(request, &format!("sftp copy failed (1): {y}"))) }
+        };
 
-            }
-        }
         return Ok(());
     }
 
@@ -273,8 +267,6 @@ impl Connection for SshConnection {
         sess.set_tcp_stream(tcp);
         match sess.handshake() { Ok(_) => {}, _ => { return Err(String::from("SSH handshake failed")); } } ;
         
-        //let identities = agent.identities();
-        
         if self.login_password.is_some() {
             match sess.userauth_password(&self.username.clone(), self.login_password.clone().unwrap().as_str()) {
                 Ok(_) => {},
@@ -283,7 +275,9 @@ impl Connection for SshConnection {
                 }
             }
         }
+
         if self.key.is_some() {
+            // a specific key was specified, 
             let k2 = self.key.as_ref().unwrap().clone();
             let keypath = Path::new(&k2);
             if ! keypath.exists() {
@@ -298,16 +292,55 @@ impl Connection for SshConnection {
         }
         
         if self.key.is_none() && self.login_password.is_none() {
-            // no key or password given, try to authenticate with the identities in the agent
-            match sess.userauth_agent(&self.username) { 
-                Ok(_) => {}, 
-                Err(x) => { 
-                    return Err(format!("SSH agent authentication failed for user {}: {}", self.username, x));
+            if self.key_comment.is_some() {
+                // use this specific SSH key
+                let mut agent = sess.agent().unwrap();
+                match agent.connect() {
+                    Ok(_) => {},
+                    Err(x) => {
+                        return Err(format!("SSH cannot connect to agent: {}", x));
+                    }
+                };
+                // list_identities is needed to populate the identities in memory,
+                // see: https://docs.rs/ssh2/latest/ssh2/struct.Agent.html#method.list_identities
+                match agent.list_identities() {
+                    Ok(_) => {},
+                    Err(x) => {
+                        return Err(format!("SSH list_identities returned an error, please check whether agent is running: {}", x));
+                    }
+                };
+                let mut found : bool = false;
+                for ident in agent.identities().unwrap() {
+                    match ident.comment() == self.key_comment.clone().unwrap() {
+                        true => {
+                            match agent.userauth(&self.username, &ident) {
+                                Ok(_) => {
+                                    // use this identity
+                                    found = true;
+                                    break;
+                                },
+                                Err(x) => { 
+                                    return Err(format!("SSH Key authentication failed for user {} with key {}: {}", 
+                                        self.username, self.key_comment.clone().unwrap(), x)); 
+                                }
+                            };
+                        }
+                        false => (),
+                    }
                 }
-            };
+                if !found {
+                    return Err(format!("specified SSH key not found with comment {}", self.key_comment.clone().unwrap()));
+                }
+            } else {
+                // no key comment specified, do not use a specific key
+                match sess.userauth_agent(&self.username) { 
+                    Ok(_) => {}, 
+                    Err(x) => { 
+                        return Err(format!("SSH agent authentication failed for user {}: {}", self.username, x));
+                    }
+                };
+            }
         }
-
-
 
         if !(sess.authenticated()) { return Err("failed to authenticate".to_string()); };
       

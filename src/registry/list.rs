@@ -47,6 +47,7 @@ use crate::modules::files::template::TemplateTask;
 
 // packages
 use crate::modules::packages::apt::AptTask;
+use crate::modules::packages::homebrew::HomebrewTask;
 use crate::modules::packages::pacman::PacmanTask;
 use crate::modules::packages::yum_dnf::YumDnfTask;
 use crate::modules::packages::zypper::ZypperTask;
@@ -70,6 +71,7 @@ pub enum Task {
     Fail(FailTask),
     File(FileTask),
     Git(GitTask),
+    Homebrew(HomebrewTask),
     Pacman(PacmanTask),
     Sd_Service(SystemdServiceTask),
     Set(SetTask),
@@ -95,6 +97,7 @@ impl Task {
             Task::Fail(x)       => x.get_module(), 
             Task::File(x)       => x.get_module(),
             Task::Git(x)        => x.get_module(), 
+            Task::Homebrew(x)   => x.get_module(),
             Task::Pacman(x)     => x.get_module(),
             Task::Sd_Service(x) => x.get_module(),
             Task::Set(x)        => x.get_module(), 
@@ -119,6 +122,7 @@ impl Task {
             Task::Fail(x)       => x.get_name(), 
             Task::File(x)       => x.get_name(), 
             Task::Git(x)        => x.get_name(),
+            Task::Homebrew(x)   => x.get_name(),
             Task::Pacman(x)     => x.get_name(),
             Task::Sd_Service(x) => x.get_name(),
             Task::Set(x)        => x.get_name(),
@@ -143,6 +147,7 @@ impl Task {
             Task::Fail(x)       => x.get_with(), 
             Task::File(x)       => x.get_with(),
             Task::Git(x)        => x.get_with(), 
+            Task::Homebrew(x)   => x.get_with(),
             Task::Pacman(x)     => x.get_with(),
             Task::Sd_Service(x) => x.get_with(),
             Task::Set(x)        => x.get_with(),
@@ -168,6 +173,7 @@ impl Task {
             Task::Fail(x)       => x.evaluate(handle, request, tm),  
             Task::File(x)       => x.evaluate(handle, request, tm), 
             Task::Git(x)        => x.evaluate(handle, request, tm),
+            Task::Homebrew(x)   => x.evaluate(handle, request, tm),
             Task::Pacman(x)     => x.evaluate(handle, request, tm),
             Task::Sd_Service(x) => x.evaluate(handle, request, tm),
             Task::Set(x)        => x.evaluate(handle, request, tm),

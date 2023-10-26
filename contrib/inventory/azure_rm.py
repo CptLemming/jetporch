@@ -20,12 +20,6 @@
 #
 
 '''
-Important note (2018/10)
-========================
-This inventory script is in maintenance mode: only critical bug fixes but no new features.
-There's new Azure external inventory script at https://github.com/jeti/jeti/blob/devel/lib/jeti/plugins/inventory/azure_rm.py,
-with better performance and latest new features. Please go to the link to get latest Azure inventory.
-
 Azure External Inventory Script
 ===============================
 Generates dynamic inventory by making API requests to the Azure Resource
@@ -75,7 +69,7 @@ When run for a specific host using the --host option, a resource group is
 required. For a specific host, this script returns the following variables:
 
 {
-  "ansible_host": "XXX.XXX.XXX.XXX",
+  "jet_ssh_hostname": "XXX.XXX.XXX.XXX",
   "computer_name": "computer_name2",
   "fqdn": null,
   "id": "/subscriptions/subscription-id/resourceGroups/galaxy-production/providers/Microsoft.Compute/virtualMachines/object-name",
@@ -237,10 +231,7 @@ except ImportError:
     HAS_AZURE_CLI_CORE = False
     CLIError = Exception
 
-try:
-    from jeti.release import __version__ as ansible_version
-except ImportError:
-    ansible_version = 'unknown'
+filler_version = '0.0.1'
 
 AZURE_CREDENTIAL_ENV_MAPPING = dict(
     profile='AZURE_PROFILE',
@@ -268,7 +259,7 @@ AZURE_CONFIG_SETTINGS = dict(
 )
 
 AZURE_MIN_VERSION = "2.0.0"
-JETI_USER_AGENT = 'Jeti/{0}'.format(ansible_version)
+JETI_USER_AGENT = 'Jeti/{0}'.format(filler_version)
 
 
 def azure_id_to_dict(id):
@@ -685,7 +676,7 @@ class AzureInventory(object):
                 self._get_security_groups(resource_group)
 
             host_vars = dict(
-                ansible_host=None,
+                jet_ssh_hostname=None,
                 private_ip=None,
                 private_ip_alloc_method=None,
                 public_ip=None,
@@ -726,18 +717,8 @@ class AzureInventory(object):
 
             # Add windows details
             if machine.os_profile is not None and machine.os_profile.windows_configuration is not None:
-                host_vars['ansible_connection'] = 'winrm'
-                host_vars['windows_auto_updates_enabled'] = \
-                    machine.os_profile.windows_configuration.enable_automatic_updates
-                host_vars['windows_timezone'] = machine.os_profile.windows_configuration.time_zone
-                host_vars['windows_rm'] = None
-                if machine.os_profile.windows_configuration.win_rm is not None:
-                    host_vars['windows_rm'] = dict(listeners=None)
-                    if machine.os_profile.windows_configuration.win_rm.listeners is not None:
-                        host_vars['windows_rm']['listeners'] = []
-                        for listener in machine.os_profile.windows_configuration.win_rm.listeners:
-                            host_vars['windows_rm']['listeners'].append(dict(protocol=listener.protocol.name,
-                                                                             certificate_url=listener.certificate_url))
+                # no windows support
+                continue
 
             for interface in machine.network_profile.network_interfaces:
                 interface_reference = self._parse_ref_id(interface.id)
@@ -758,14 +739,14 @@ class AzureInventory(object):
                         host_vars['private_ip'] = ip_config.private_ip_address
                         host_vars['private_ip_alloc_method'] = ip_config.private_ip_allocation_method
                         if self.use_private_ip:
-                            host_vars['ansible_host'] = ip_config.private_ip_address
+                            host_vars['jet_ssh_hostname'] = ip_config.private_ip_address
                         if ip_config.public_ip_address:
                             public_ip_reference = self._parse_ref_id(ip_config.public_ip_address.id)
                             public_ip_address = self._network_client.public_ip_addresses.get(
                                 public_ip_reference['resourceGroups'],
                                 public_ip_reference['publicIPAddresses'])
                             if not self.use_private_ip:
-                                host_vars['ansible_host'] = public_ip_address.ip_address
+                                host_vars['jet_ssh_hostname'] = public_ip_address.ip_address
                             host_vars['public_ip'] = public_ip_address.ip_address
                             host_vars['public_ip_name'] = public_ip_address.name
                             host_vars['public_ip_alloc_method'] = public_ip_address.public_ip_allocation_method

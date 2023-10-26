@@ -51,8 +51,8 @@ pub enum DynamicInventoryJson {
 #[derive(Debug,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DynamicInventoryJsonEntry {
-    hostvars : Option<HashMap<String, serde_json::Value>>, /* if supplied, hosts is not supplied */
-    vars     : Option<HashMap<String, serde_json::Value>>,
+    hostvars : Option<serde_json::Map<String, serde_json::Value>>, /* if supplied, hosts is not supplied */
+    vars     :  Option<serde_json::Map<String, serde_json::Value>>,
     children : Option<Vec<String>>,
     hosts    : Option<Vec<String>>
 }
@@ -121,7 +121,19 @@ fn load_on_disk_inventory_tree(inventory: &Arc<RwLock<Inventory>>, include_group
 // for inventory/groups/* files
 fn load_groups_directory(inventory: &Arc<RwLock<Inventory>>, path: &Path) -> Result<(), String> {
     path_walk(path, |groups_file_path| {
-        let group_name = path_basename_as_string(&groups_file_path).clone();
+
+        let mut group_name = path_basename_as_string(&groups_file_path).clone();
+
+        // skip dot files and backup files
+        if group_name.ends_with("~") || group_name.starts_with(".") {
+            return Ok(());
+        }
+
+        // ignore yaml extensions
+        if group_name.ends_with(".yml") {
+            group_name = group_name[0 .. group_name.len() - 4].to_string();
+        }
+
         let groups_file = jet_file_open(&groups_file_path)?;
         let groups_file_parse_result: Result<YamlGroup, serde_yaml::Error> = serde_yaml::from_reader(groups_file);
         if groups_file_parse_result.is_err() {
@@ -157,21 +169,29 @@ fn add_group_file_contents_to_inventory(inventory: &Arc<RwLock<Inventory>>, grou
 
 }
             
-// this is used by both on-disk and dynamic inventory sources to load group/ and vars/ directories
+// this is used by both on-disk and dynamic inventory sources to load group_vars/ and host_vars/ directories
 fn load_vars_directory(inventory: &Arc<RwLock<Inventory>>, path: &Path, is_group: bool) -> Result<(), String> {
 
     let inv = inventory.write().unwrap();
 
     path_walk(path, |vars_path| {
 
+        let mut effective_name = path_basename_as_string(&vars_path).clone();
+        // skip dot files and backup files
+        if effective_name.ends_with("~") || effective_name.starts_with(".") {
+            return Ok(());
+        }
+        // ignore yaml extensions
+        if effective_name.ends_with(".yml") {
+            effective_name = effective_name[0 .. effective_name.len() - 4].to_string();
+        }
 
-        let base_name = path_basename_as_string(&vars_path).clone();
         // FIXME: warning and continue instead?
         match is_group {
             true => {
-                if !inv.has_group(&base_name.clone()) { return Ok(()); }
+                if !inv.has_group(&effective_name.clone()) { return Ok(()); }
             } false => {
-                if !inv.has_host(&base_name.clone()) { return Ok(()); }
+                if !inv.has_host(&effective_name.clone()) { return Ok(()); }
             }
         }
         
@@ -188,11 +208,11 @@ fn load_vars_directory(inventory: &Arc<RwLock<Inventory>>, path: &Path, is_group
         //let yaml_string = &serde_yaml::to_string(&yaml_result).unwrap();
         match is_group {
             true  => {
-                let group = inv.get_group(&base_name.clone());
+                let group = inv.get_group(&effective_name.clone());
                 group.write().unwrap().set_variables(yaml_result);
             }
             false => {
-                let host = inv.get_host(&base_name);
+                let host = inv.get_host(&effective_name);
                 host.write().unwrap().set_variables(yaml_result);
             }
         }
@@ -214,7 +234,7 @@ fn load_dynamic_inventory(inv: &Arc<RwLock<Inventory>>, path: &Path) -> Result<(
                 None => { return Err(format!("unable to get status code from process: {}", path.display())) }
             }
         },
-        Err(_x) => { return Err(format!("inventory script failed: {}", path.display())); }
+        Err(y) => { return Err(format!("inventory script failed: {}, {}", path.display(), y)); }
     };
 
     let file_parse_result: Result<HashMap<String, DynamicInventoryJsonEntry>, serde_json::Error> = serde_json::from_str(&output);
@@ -259,27 +279,20 @@ fn load_dynamic_inventory(inv: &Arc<RwLock<Inventory>>, path: &Path) -> Result<(
             }
         }
         if entry.vars.as_ref().is_some() {
-            let vars = entry.vars.as_ref().unwrap();
-            for (_key, values) in vars.iter() {
-                let vars = convert_json_vars(&values);
-                let mut grp = group.write().unwrap();
-                grp.update_variables(vars);
-            }
+            let mut grp = group.write().unwrap();
+            let vars = convert_json_vars(&serde_json::Value::Object(entry.vars.clone().unwrap()));
+            grp.update_variables(vars);
         }
     }
 
     Ok(())
 }
 
-// TODO: this is used in the parser also, move to utils/
-
 pub fn convert_json_vars(input: &serde_json::Value) -> serde_yaml::Mapping {
     let json = input.to_string();
-    let file_parse_result: Result<serde_yaml::Mapping, serde_yaml::Error> = serde_yaml::from_str(&json);
-    match file_parse_result {
+    let parse_result: Result<serde_yaml::Mapping, serde_yaml::Error> = serde_yaml::from_str(&json);
+    match parse_result {
        Ok(parsed) => return parsed.clone(),
-       Err(y) => panic!("unable to load JSON back to YAML, this shouldn't happen: {}", y)
+       Err(y) => panic!("unable to load JSON back to YAML (1), this shouldn't happen: {}", y)
     } 
 }
-
-

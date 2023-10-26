@@ -47,8 +47,8 @@ Run for Specific Host
 When run for a specific container using the --host option this script returns the following hostvars:
 
 {
-    "ansible_ssh_host": "",
-    "ansible_ssh_port": 0,
+    "jet_ssh_host": "",
+    "jet_ssh_port": 0,
     "docker_apparmorprofile": "",
     "docker_args": [],
     "docker_config": {
@@ -258,7 +258,7 @@ script:
         The private port (container port) on which SSH is listening for connections. Defaults to 22.
 
     DOCKER_DEFAULT_IP:
-        The IP address to assign to ansible_host when the container's SSH port is mapped to interface '0.0.0.0'.
+        The IP address to assign to jet_ssh_hostname when the container's SSH port is mapped to interface '0.0.0.0'.
 
 
 Configuration File
@@ -322,7 +322,7 @@ For the default host and each host in the hosts list define the following attrib
      default: 60
 
   default_ip:
-     description: The IP address to assign to ansible_host when the container's SSH port is mapped to interface
+     description: The IP address to assign to jet_ssh_hostname when the container's SSH port is mapped to interface
      '0.0.0.0'.
      required: false
      default: 127.0.0.1
@@ -660,8 +660,8 @@ class DockerInventory(object):
                     ip = ''
 
                 facts = dict(
-                    ansible_ssh_host=ip,
-                    ansible_ssh_port=port.get('HostPort', int()),
+                    jet_ssh_host=ip,
+                    jet_ssh_port=port.get('HostPort', int()),
                     docker_name=name,
                     docker_short_id=short_id
                 )

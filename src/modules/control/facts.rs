@@ -27,10 +27,14 @@ const MODULE: &str = "facts";
 #[serde(deny_unknown_fields)]
 pub struct FactsTask {
     pub name: Option<String>,
+    pub facter: Option<String>,
+    pub ohai: Option<String>,
     pub with: Option<PreLogicInput>,
     pub and: Option<PostLogicInput>
 }
 struct FactsAction {
+    facter: bool,
+    ohai: bool,
 }
 
 impl IsTask for FactsTask {
@@ -43,6 +47,9 @@ impl IsTask for FactsTask {
         return Ok(
             EvaluatedTask {
                 action: Arc::new(FactsAction {
+                    facter:  handle.template.boolean_option_default_false(&request, tm, &String::from("facter"), &self.facter)?,
+                    ohai:    handle.template.boolean_option_default_false(&request, tm, &String::from("ohai"), &self.ohai)?,
+
                 }),
                 with: Arc::new(PreLogicInput::template(handle, request, tm, &self.with)?),
                 and: Arc::new(PostLogicInput::template(handle, request, tm, &self.and)?),
@@ -79,12 +86,18 @@ impl FactsAction {
         let os_type = handle.host.read().unwrap().os_type;
         let facts = Arc::new(RwLock::new(serde_yaml::Mapping::new()));
         match os_type {
-            Some(HostOSType::Linux) => { self.do_linux_facts(handle, request, &facts)?; },
-            Some(HostOSType::MacOS) => { self.do_mac_facts(handle, request, &facts)?;   }
-            Some(HostOSType::OpenBSD) => { self.do_openbsd_facts(handle, request, &facts)?;   }
-            None => { return Err(handle.response.is_failed(request, &String::from("facts not implemented for OS Type"))); }
+            Some(HostOSType::Linux)   => { self.do_linux_facts(handle, request, &facts)?   },
+            Some(HostOSType::MacOS)   => { self.do_mac_facts(handle, request, &facts)?     },
+            None => { return Err(handle.response.is_failed(request, &String::from("facts not implemented for OS Type"))) }
         };
         self.do_arch(handle, request, &facts)?;
+        if self.facter {
+            self.do_facter(handle, request, &facts)?;
+        }
+        if self.ohai {
+            self.do_ohai(handle, request, &facts)?;
+
+        }
         handle.host.write().unwrap().update_facts(&facts);
         return Ok(());
     }
@@ -93,27 +106,22 @@ impl FactsAction {
         mapping.write().unwrap().insert(serde_yaml::Value::String(key.clone()), serde_yaml::Value::String(value.clone())); 
     }
 
+    fn insert_json(&self, mapping: &Arc<RwLock<serde_yaml::Mapping>>, key: &String, value: &String) -> Result<(), String> {
+        match serde_json::from_str(value) {
+            Ok(json) => { mapping.write().unwrap().insert(serde_yaml::Value::String(key.clone()), json); Ok(()) }
+            Err(y) => Err(format!("error processing fact JSON: {:?}", y))
+        }
+    }
+
     fn do_mac_facts(&self, _handle: &Arc<TaskHandle>, _request: &Arc<TaskRequest>, mapping: &Arc<RwLock<serde_yaml::Mapping>>) -> Result<(), Arc<TaskResponse>> {
-        // sets jet_os_type=MacOS
         self.insert_string(mapping, &String::from("jet_os_type"), &String::from("MacOS"));
         self.insert_string(mapping, &String::from("jet_os_flavor"), &String::from("OSX"));
-
         return Ok(());
     }
 
     fn do_linux_facts(&self, handle: &Arc<TaskHandle>, request: &Arc<TaskRequest>, mapping: &Arc<RwLock<serde_yaml::Mapping>>) -> Result<(), Arc<TaskResponse>> {
-        // sets jet_os_type=Linux
         self.insert_string(mapping, &String::from("jet_os_type"), &String::from("Linux"));
-        // and more facts...
         self.do_linux_os_release(handle, request, mapping)?;
-        return Ok(());
-    }
-
-    fn do_openbsd_facts(&self, _handle: &Arc<TaskHandle>, _request: &Arc<TaskRequest>, mapping: &Arc<RwLock<serde_yaml::Mapping>>) -> Result<(), Arc<TaskResponse>> {
-        // sets jet_os_type=OpenBSD
-        self.insert_string(mapping, &String::from("jet_os_type"), &String::from("OpenBSD"));
-        self.insert_string(mapping, &String::from("jet_os_flavor"), &String::from("OpenBSD"));
-
         return Ok(());
     }
 
@@ -145,9 +153,15 @@ impl FactsAction {
                         self.insert_string(mapping, &String::from("jet_os_flavor"), &String::from("Arch"))
                     }
                 }
+                // if /etc/os-release does not have ID_LIKE line, like Archlinux
+                if k1.eq("id") {
+                    if v1.find("arch").is_some() {
+                        self.insert_string(mapping, &String::from("jet_os_flavor"), &String::from("Arch"));
+                    }
+                }
             }
         }
-        // jet_os_flavor should always have a value to prevent errors
+        // jet_os_flavor should always have a value to prevent errors from invalid templates
         if ! mapping.read().unwrap().contains_key("jet_os_flavor") {
             self.insert_string(mapping, &String::from("jet_os_flavor"), &String::from("Unknown"))
         }
@@ -155,12 +169,35 @@ impl FactsAction {
     }
 
     fn do_arch(&self, handle: &Arc<TaskHandle>, request: &Arc<TaskRequest>, mapping: &Arc<RwLock<serde_yaml::Mapping>>) -> Result<(), Arc<TaskResponse>> {
-        // run uname -m to get the architecture of the system
-        let cmd = String::from("uname -m");
+        let os_type = handle.host.read().unwrap().os_type.expect("os type");
+        let cmd = match crate::tasks::cmd_library::get_arch_command(os_type) {
+            Ok(x) => x,
+            Err(_) => { return Err(handle.response.is_failed(request, &format!("unable to determine arch command for {:?}", os_type))) },
+        };
         let result = handle.remote.run(request, &cmd, CheckRc::Checked)?;
         let (_rc, out) = cmd_info(&result);
-        self.insert_string(mapping, &String::from("jet_os_arch"), &String::from(out));
+        self.insert_string(mapping, &String::from("jet_arch"), &String::from(out));
         return Ok(());
     }
+
+    fn do_facter(&self, handle: &Arc<TaskHandle>, request: &Arc<TaskRequest>, mapping: &Arc<RwLock<serde_yaml::Mapping>>) -> Result<(), Arc<TaskResponse>> {
+        let result = handle.remote.run(request, &String::from("facter --json"), CheckRc::Checked)?;
+        let (_rc, out) = cmd_info(&result);
+        match self.insert_json(mapping, &String::from("facter"), &String::from(out)) {
+            Ok(_) => {},
+            Err(_) => { return Err(handle.response.is_failed(request, &String::from("failed to parse facter output"))) }
+        }
+        return Ok(());    }
+
+    fn do_ohai(&self, handle: &Arc<TaskHandle>, request: &Arc<TaskRequest>, mapping: &Arc<RwLock<serde_yaml::Mapping>>) -> Result<(), Arc<TaskResponse>> {
+        let result = handle.remote.run(request, &String::from("ohai"), CheckRc::Checked)?;
+        let (_rc, out) = cmd_info(&result);
+        match self.insert_json(mapping, &String::from("ohai"), &String::from(out)) {
+            Ok(_) => {},
+            Err(_) => { return Err(handle.response.is_failed(request, &String::from("failed to parse ohai output"))) }
+        }
+        return Ok(());
+    }
+
 }
 

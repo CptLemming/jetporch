@@ -88,7 +88,6 @@ pub fn get_mode_command(os_type: HostOSType, untrusted_path: &String) -> Result<
     return match os_type {
         HostOSType::Linux => Ok(format!("stat --format '%a' '{}'", path)),
         HostOSType::MacOS => Ok(format!("stat -f '%A' '{}'", path)),
-        HostOSType::OpenBSD => Ok(format!("stat -f '%OLp' '{}'", path)),
     }
 }
 
@@ -97,7 +96,6 @@ pub fn get_sha512_command(os_type: HostOSType, untrusted_path: &String) -> Resul
     return match os_type {
         HostOSType::Linux => Ok(format!("sha512sum '{}'", path)),
         HostOSType::MacOS => Ok(format!("shasum -b -a 512 '{}'", path)),
-        HostOSType::OpenBSD => Ok(format!("cksum -r -a sha512 '{}'", path)),
     }
 }
 
@@ -129,7 +127,7 @@ pub fn get_delete_file_command(_os_type: HostOSType, untrusted_path: &String) ->
 pub fn get_delete_directory_command(_os_type: HostOSType, untrusted_path: &String, recurse: Recurse) -> Result<String,String>  {
     let path = screen_path(untrusted_path)?;
     match recurse {
-        Recurse::No  => { return Ok(format!("rm -d '{}'", path));    },
+        Recurse::No  => { return Ok(format!("rmdir '{}'", path));  },
         Recurse::Yes => { return Ok(format!("rm -rf '{}'", path)); }
     }
 }
@@ -162,6 +160,13 @@ pub fn set_mode_command(_os_type: HostOSType, untrusted_path: &String, untrusted
         Recurse::Yes => { return Ok(format!("chmod -R '{}' '{}'", mode, path)); }
     }
 }
+
+pub fn get_arch_command(os_type: HostOSType) -> Result<String,String> {
+    match os_type {
+        _ => { return Ok(String::from("uname -m")) },
+    }
+}
+
 
 
 

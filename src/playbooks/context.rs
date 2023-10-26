@@ -29,6 +29,7 @@ use crate::handle::template::BlendTarget;
 use std::ops::Deref;
 use std::env;
 use guid_create::GUID;
+use expanduser::expanduser;
 
 // the playbook traversal state, and a little bit more than that.
 // the playbook context keeps track of where we are in a playbook
@@ -300,7 +301,7 @@ impl PlaybookContext {
 
     // FIXME: this should return a struct
 
-    pub fn get_ssh_connection_details(&self, host: &Arc<RwLock<Host>>) -> (String,String,i64,Option<String>,Option<String>,Option<String>) {
+    pub fn get_ssh_connection_details(&self, host: &Arc<RwLock<Host>>) -> (String,String,i64,Option<String>,Option<String>,Option<String>,Option<String>) {
 
         let vars = self.get_complete_blended_variables(host,BlendTarget::NotTemplateModule);
         let host2 = host.read().unwrap();
@@ -320,12 +321,16 @@ impl PlaybookContext {
             false => self.ssh_user.clone()
         };
         let remote_port = match vars.contains_key(&String::from("jet_ssh_port")) {
-            true => match vars.get(&String::from("jet_ssh_port")).unwrap().as_i64() {
+            true => match vars.get(&String::from("jet_ssh_port")).unwrap().as_str() {
                 Some(x) => {
-                    x
+                    match x.parse::<i64>() {
+                        Ok(ix) => ix,
+                        Err(_) => self.ssh_port
+                    }
                 },
-                None => {
-                    self.ssh_port
+                None => match vars.get(&String::from("jet_ssh_port")).unwrap().as_i64() {
+                    Some(x) => x,
+                    None => self.ssh_port
                 }
             },
             false => {
@@ -334,7 +339,12 @@ impl PlaybookContext {
         };
         let keyfile : Option<String> = match vars.contains_key(&String::from("jet_ssh_private_key_file")) {
             true => match vars.get(&String::from("jet_ssh_private_key_file")).unwrap().as_str() {
-                Some(x) => Some(String::from(x)),
+                Some(x) => {
+                    match expanduser(String::from(x)) {
+                        Ok(expanded) => Some(expanded.display().to_string()),
+                        Err(_) => None
+                    }
+                }
                 None => None
             },
             false => None
@@ -349,6 +359,16 @@ impl PlaybookContext {
                 Err(_) => None
             }
         };
+        let key_comment: Option<String> = match vars.contains_key(&String::from("jet_ssh_key_comment")) {
+            true => match vars.get(&String::from("jet_ssh_key_comment")).unwrap().as_str() {
+                Some(x) => Some(String::from(x)),
+                None =>  None
+            },
+            false => match env::var("JET_SSH_KEY_COMMENT") {
+                Ok(x) => Some(x),
+                Err(_) => None
+             }
+        };
         let transfer_protocol: Option<String> = match vars.contains_key(&String::from("jet_ssh_transfer_protocol")) {
             true => match vars.get(&String::from("jet_ssh_transfer_protocol")).unwrap().as_str() {
                 Some(x) => Some(String::from(x)),
@@ -360,7 +380,7 @@ impl PlaybookContext {
             }
         };
 
-        return (remote_hostname, remote_user, remote_port, keyfile, passphrase, transfer_protocol)
+        return (remote_hostname, remote_user, remote_port, keyfile, passphrase, key_comment, transfer_protocol)
     } 
 
     // loads environment variables into the context, adding an "ENV_foo" prefix

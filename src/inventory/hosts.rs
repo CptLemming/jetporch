@@ -26,7 +26,6 @@ use serde_yaml;
 pub enum HostOSType {
     Linux,
     MacOS,
-    OpenBSD,
 }
 
 #[derive(Clone,Copy,Debug)]
@@ -45,7 +44,6 @@ pub struct Host {
     checksum_cache         : HashMap<String,String>,
     checksum_cache_task_id : usize,
     facts                  : serde_yaml::Value,
-    dyn_variables          : serde_yaml::Value,
     pub package_preference : Option<PackagePreference>,
     notified_handlers      : HashMap<usize, HashSet<String>>
 }
@@ -61,7 +59,6 @@ impl Host {
             checksum_cache: HashMap::new(),
             checksum_cache_task_id: 0,
             facts: serde_yaml::Value::from(serde_yaml::Mapping::new()),
-            dyn_variables: serde_yaml::Value::from(serde_yaml::Mapping::new()),
             notified_handlers: HashMap::new(),
             package_preference: None
         }
@@ -104,13 +101,9 @@ impl Host {
 
     // used by connection class on initial connect
     pub fn set_os_info(&mut self, uname_output: &String) -> Result<(),String> {
-        if uname_output.starts_with("Linux") {
-            self.os_type = Some(HostOSType::Linux);
-        } else if uname_output.starts_with("Darwin") {
-            self.os_type = Some(HostOSType::MacOS);
-        } else if uname_output.starts_with("OpenBSD") {
-            self.os_type = Some(HostOSType::OpenBSD);
-        } else {
+        if uname_output.starts_with("Linux")   { self.os_type = Some(HostOSType::Linux)   }
+        else if uname_output.starts_with("Darwin")  { self.os_type = Some(HostOSType::MacOS)   }
+        else {
             return Err(format!("OS Type could not be detected from uname -a: {}", uname_output));
         }
         return Ok(());
@@ -132,6 +125,22 @@ impl Host {
         for (k,_v) in self.groups.iter() {
             if k == group_name {
                 return true;
+            }
+        }
+        return false;
+    }
+
+    // get_ancestor_groups(&self, depth_limit: usize) -> HashMap<String, Arc<RwLock<Group>>>
+
+    pub fn has_ancestor_group(&self, group_name: &String) -> bool {
+        for (k,v) in self.groups.iter() {
+            if k == group_name {
+                return true;
+            }
+            for (k2,_v2) in v.read().unwrap().get_ancestor_groups(10) {
+                if k2 == group_name.clone() {
+                    return true;
+                }
             }
         }
         return false;
@@ -170,8 +179,9 @@ impl Host {
     }
 
     pub fn update_variables(&mut self, mapping: serde_yaml::Mapping) {
-        let map = mapping.clone();
-        blend_variables(&mut self.dyn_variables, serde_yaml::Value::Mapping(map));
+        for (k,v) in mapping.iter() {
+            self.variables.insert(k.clone(),v.clone());
+        }
     }
 
     pub fn get_blended_variables(&self) -> serde_yaml::Mapping {
@@ -181,7 +191,6 @@ impl Host {
             let theirs : serde_yaml::Value = serde_yaml::Value::from(v.read().unwrap().get_variables());
             blend_variables(&mut blended, theirs);
         }
-        blend_variables(&mut blended, self.dyn_variables.clone());
         let mine = serde_yaml::Value::from(self.get_variables());
         blend_variables(&mut blended, mine);
         blend_variables(&mut blended, self.facts.clone());
